@@ -298,4 +298,63 @@ case("sub_timestamps_degenerate", function()
   end
 end)
 
+local MSG_LINE = '{"t":"msg","d":{"role":"user","content":[{"type":"text","text":"hi\\n"}]}}'
+local SUB_LINE = '{"t":"sub_msg","sub":"tool-7","d":{"role":"user","content":[]}}'
+
+case("classify_reads_the_type_off_the_prefix", function()
+  eq(core.classify('{"t":"header","v":2,"id":"x"}'), "header")
+  eq(core.classify('{"t":"meta","title":"x"}'), "meta")
+  eq(core.classify('{"t":"out","id":"x","d":{"Diff":{}}}'), "out")
+  eq(core.classify(MSG_LINE), "msg")
+  local t, sub = core.classify(SUB_LINE)
+  eq(t, "sub_msg")
+  eq(sub, "tool-7")
+end)
+
+case("classify_defers_anything_off_the_standard_shape", function()
+  eq(core.classify(""), nil)
+  eq(core.classify("not json"), nil)
+  eq(core.classify('{"d":{},"t":"msg"}'), nil)
+  eq(core.classify('{"t": "msg"}'), nil)
+  -- No field after the key: where the key ends is not knowable here.
+  eq(core.classify('{"t":"sub_msg","sub":"a"}'), nil)
+  eq(core.classify('{"t":"sub_msg","sub":"a"}x'), nil)
+end)
+
+case("line_reader_splits_at_every_window_edge", function()
+  local source = "aa\nbb\nccc\nd\n"
+  for cut = 1, #source do
+    local lines = {}
+    local reader = core.new_line_reader(function(line)
+      lines[#lines + 1] = line
+    end)
+    eq(reader:push(source:sub(1, cut)), nil, "push 1 at " .. cut)
+    eq(reader:push(source:sub(cut + 1)), nil, "push 2 at " .. cut)
+    eq(reader:finish(), nil, "finish at " .. cut)
+    eq(table.concat(lines, "|"), "aa|bb|ccc|d", "lines at cut " .. cut)
+  end
+end)
+
+case("line_reader_keeps_an_unterminated_last_line", function()
+  local lines = {}
+  local reader = core.new_line_reader(function(line)
+    lines[#lines + 1] = line
+  end)
+  eq(reader:push("x\ny"), nil)
+  eq(reader:finish(), nil)
+  eq(table.concat(lines, "|"), "x|y")
+end)
+
+case("line_reader_stops_when_the_handler_reports_an_error", function()
+  local seen = 0
+  local reader = core.new_line_reader(function()
+    seen = seen + 1
+    return "boom"
+  end)
+  eq(reader:push("a\nb\nc\n"), "boom")
+  eq(reader:push("d\n"), "boom")
+  eq(reader:finish(), "boom")
+  eq(seen, 1)
+end)
+
 th.report()

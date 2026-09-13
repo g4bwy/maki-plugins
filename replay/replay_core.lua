@@ -336,4 +336,82 @@ function M.sub_timestamp(t_start, t_end, index, count)
   return t_start + math.floor(span * (index - 0.5) / count)
 end
 
+-- Type of one session record, read off the prefix maki writes it with, plus
+-- the sub-agent key of a sub_msg line. Returns nil for anything that is not
+-- in that shape so the caller falls back to decoding the line.
+--
+-- The prefix path matters for size: most of a large session is `out`
+-- tool-output records the export drops, and decoding hundreds of megabytes
+-- of them just to learn their type would dominate the command.
+function M.classify(line)
+  local t = line:match('^{"t":"([%a_]+)"')
+  if not t then
+    return nil
+  elseif t ~= "sub_msg" then
+    return t
+  end
+  -- The comma is required after the key: a sub_msg line that does not put
+  -- another field after "sub" is not the shape written here, so decode it
+  -- instead of guessing where the key ends.
+  local sub = line:match('^{"t":"sub_msg","sub":"([^"]*)",')
+  if not sub then
+    return nil
+  end
+  return t, sub
+end
+
+-- Reassemble whole lines out of a byte stream that arrives in arbitrary
+-- windows. A window can end in the middle of a line, so the bytes after its
+-- last newline carry over to the next one. Lines go to on_line one at a
+-- time, so a caller never holds more of the file than one window plus one
+-- line. on_line may answer with an error message to stop the stream; push
+-- and finish then hand that message back to the caller and deliver nothing
+-- more.
+function M.new_line_reader(on_line)
+  local self = { carry = "", err = nil }
+
+  local function consume(buf)
+    local start = 1
+    while true do
+      local nl = buf:find("\n", start, true)
+      if not nl then
+        self.carry = buf:sub(start)
+        return nil
+      end
+      local stop = on_line(buf:sub(start, nl - 1))
+      if stop then
+        return stop
+      end
+      start = nl + 1
+    end
+  end
+
+  function self:push(chunk)
+    if self.err then
+      return self.err
+    end
+    local buf = chunk or ""
+    if self.carry ~= "" then
+      buf = self.carry .. buf
+      self.carry = ""
+    end
+    self.err = consume(buf)
+    return self.err
+  end
+
+  function self:finish()
+    if self.err then
+      return self.err
+    end
+    local tail = self.carry
+    self.carry = ""
+    if tail ~= "" then
+      self.err = on_line(tail)
+    end
+    return self.err
+  end
+
+  return self
+end
+
 return M
