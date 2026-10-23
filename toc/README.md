@@ -14,8 +14,8 @@ The plugin calls APIs that a stock maki build does not yet expose:
 
 - `maki.ui.transcript_outline()` — the jumpable blocks of the transcript, as
   the chat itself lists them, with first-line previews.
-- `maki.ui.scroll_to_block(kind, n)` — scroll the focused chat to the nth
-  visible `"turn"`, `"thinking"` or `"reply"` block.
+- `maki.ui.scroll_to_block(position)` — scroll the focused chat to the
+  position-th entry of `maki.ui.transcript_outline()`.
 - window click events — `win:recv` must yield `{ type = "click", row, col }`.
 
 All are maki's plugin Lua API, documented under `maki.ui` and `Win:recv` in
@@ -73,10 +73,10 @@ The tree comes from `maki.ui.transcript_outline()`, which returns exactly the
 blocks the chat will jump to — turns, thinking and reply — in display order,
 each with a first-line preview. The plugin only groups: every `turn` entry
 opens a row, the `thinking` and `reply` entries that follow become its
-children, and counting each kind gives the ordinals
-`maki.ui.scroll_to_block(kind, n)` answers to. Which messages count as
+children, and each row carries its entry's position in the outline, the one
+address `maki.ui.scroll_to_block(position)` takes. Which messages count as
 visible turns is the host's decision alone, so the pane and the chat cannot
-disagree about what a number means.
+disagree about what a position means.
 
 Rows are numbered in transcript order. Tool calls stay out of the outline, to
 keep it short; folding a turn shows its thinking and reply text only.

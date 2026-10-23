@@ -23,30 +23,25 @@ local pane = nil
 
 -- The outline call already filtered to jumpable blocks and ranked them in
 -- display order; grouping is all that is left. A turn opens a group, the
--- thinking and reply entries that follow join it. Kind counts stay global
--- (children before the first turn would count too), because they are the
--- ordinals maki.ui.scroll_to_block answers to.
+-- thinking and reply entries that follow join it. Each row keeps the
+-- position its entry had in the outline, the one address
+-- maki.ui.scroll_to_block takes, so nothing has to be counted here.
 local function build_turns()
   local items, err = maki.ui.transcript_outline()
   if not items then
     return nil, err
   end
   local turns = {}
-  local seen = { thinking = 0, reply = 0 }
-  for _, item in ipairs(items) do
+  for pos, item in ipairs(items) do
     if item.kind == "turn" then
-      turns[#turns + 1] = { text = item.text, blocks = {}, kind_seen = {} }
-    else
-      seen[item.kind] = seen[item.kind] + 1
-      if #turns > 0 then
-        local turn = turns[#turns]
-        turn.kind_seen[item.kind] = (turn.kind_seen[item.kind] or 0) + 1
-        turn.blocks[#turn.blocks + 1] = {
-          kind = item.kind,
-          n = seen[item.kind],
-          label = item.kind .. " " .. turn.kind_seen[item.kind],
-        }
-      end
+      turns[#turns + 1] = { text = item.text, pos = pos, blocks = {}, kind_seen = {} }
+    elseif #turns > 0 then
+      local turn = turns[#turns]
+      turn.kind_seen[item.kind] = (turn.kind_seen[item.kind] or 0) + 1
+      turn.blocks[#turn.blocks + 1] = {
+        pos = pos,
+        label = item.kind .. " " .. turn.kind_seen[item.kind],
+      }
     end
   end
   return turns
@@ -81,7 +76,7 @@ local function render(p)
     if #turn.blocks > 0 then
       marker = expanded and MARKER_EXPANDED or MARKER_COLLAPSED
     end
-    row_map[#lines + 1] = { kind = "turn", n = n, turn = n }
+    row_map[#lines + 1] = { pos = turn.pos, turn = n }
     row_headers[#lines + 1] = true
     lines[#lines + 1] = {
       { string.format("%" .. NUM_W .. "d ", n), "tool" },
@@ -90,7 +85,7 @@ local function render(p)
     }
     if expanded then
       for _, b in ipairs(turn.blocks) do
-        row_map[#lines + 1] = { kind = b.kind, n = b.n, turn = n }
+        row_map[#lines + 1] = { pos = b.pos, turn = n }
         lines[#lines + 1] = { { SUB_PREFIX .. b.label, "dim" } }
       end
     end
@@ -101,7 +96,7 @@ local function render(p)
 end
 
 local function entry_key(e)
-  return e.kind .. "#" .. e.n
+  return "p" .. e.pos
 end
 
 local function row_of_key(p, key)
@@ -112,13 +107,22 @@ local function row_of_key(p, key)
   end
 end
 
+local function row_of_turn(p, n)
+  for row, e in ipairs(p.row_map) do
+    if p.row_headers[row] and e.turn == n then
+      return row
+    end
+  end
+end
+
 local function clamp_cursor(p)
   if #p.row_map == 0 then
     p.cursor = nil
     return
   end
-  local turn_row = row_of_key(p, "turn#" .. p.cursor_turn)
-  p.cursor = row_of_key(p, p.cursor_key) or turn_row or math.min(p.cursor or 1, #p.row_map)
+  p.cursor = row_of_key(p, p.cursor_key)
+    or row_of_turn(p, p.cursor_turn)
+    or math.min(p.cursor or 1, #p.row_map)
   p.cursor_turn = p.row_map[p.cursor].turn
   p.cursor_key = entry_key(p.row_map[p.cursor])
   p.win:set_cursor(p.cursor)
@@ -129,7 +133,7 @@ local function jump(p, e)
     maki.ui.flash(NOT_MAIN)
     return
   end
-  local ok, err = maki.ui.scroll_to_block(e.kind, e.n)
+  local ok, err = maki.ui.scroll_to_block(e.pos)
   if not ok then
     maki.ui.flash(err)
   end
@@ -223,7 +227,6 @@ local function open()
     width = PANE_WIDTH,
     task = "main",
     cursor_turn = 1,
-    cursor_key = "turn#1",
   }
   local turns, err = build_turns()
   if not turns then
@@ -302,7 +305,7 @@ maki.api.create_autocmd("CompactionDone", {
     end
     pane.expanded = {}
     pane.cursor_turn = 1
-    pane.cursor_key = "turn#1"
+    pane.cursor_key = nil
     maki.async.run(rebuild)
   end,
 })
@@ -314,7 +317,7 @@ maki.api.create_autocmd({ "SessionFocusChanged", "SessionReset" }, {
     end
     pane.task = "main"
     pane.cursor_turn = 1
-    pane.cursor_key = "turn#1"
+    pane.cursor_key = nil
     pane.expanded = {}
     maki.async.run(rebuild)
   end,
