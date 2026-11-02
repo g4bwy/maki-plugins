@@ -1,0 +1,136 @@
+diff --git a/maki-agent/src/agent/history.rs b/maki-agent/src/agent/history.rs
+index e48abd5e8..1dda3d8a7 100644
+--- a/maki-agent/src/agent/history.rs
++++ b/maki-agent/src/agent/history.rs
+@@ -3,6 +3,7 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, Weak};
+ 
+ use arc_swap::ArcSwap;
+ use maki_providers::{ContentBlock, EMPTY_RESPONSE_MARKER, Message, Role};
++use maki_storage::auth::now_millis;
+ use maki_storage::frame::{LiveFacts, StoredFrame};
+ use maki_storage::id::MakiId;
+ use maki_storage::sessions::next_epoch;
+@@ -199,7 +200,10 @@ impl History {
+         &self.snapshot.messages
+     }
+ 
+-    pub fn push(&mut self, msg: Message) {
++    pub fn push(&mut self, mut msg: Message) {
++        if msg.created_at.is_none() {
++            msg.created_at = Some(now_millis());
++        }
+         self.edit(|msgs| msgs.push(msg));
+     }
+ 
+diff --git a/maki-lua/src/api/session.rs b/maki-lua/src/api/session.rs
+index e2b9135ca..8dee1ff77 100644
+--- a/maki-lua/src/api/session.rs
++++ b/maki-lua/src/api/session.rs
+@@ -320,6 +320,7 @@ fn message_table(lua: &Lua, message: &Message) -> LuaResult<Value> {
+         kind: message.kind.clone(),
+         receipts: message.receipts.clone(),
+         settles: message.settles.clone(),
++        created_at: message.created_at,
+     };
+     let json = serde_json::to_value(&envelope).map_err(mlua::Error::external)?;
+     let table = lua.unpack::<Table>(json_to_lua_exact(lua, &json)?)?;
+@@ -409,7 +410,7 @@ async fn export(
+ /// Each message has the same shape as in the session file:
+ ///
+ /// ```text
+-/// { role = "user" | "assistant", kind, facts?, display_text?, receipts?, settles?, content = { blocks } }
++/// { role = "user" | "assistant", kind, facts?, display_text?, receipts?, settles?, created_at?, content = { blocks } }
+ /// ```
+ ///
+ /// `kind` is `"turn"` for something the user or the model said,
+@@ -421,7 +422,10 @@ async fn export(
+ /// compaction note). `receipts` lists the calls whose results in this
+ /// message moved to the background, and `settles` = `{ task, end }` marks the
+ /// notice that answered one, with `end` one of `"finished"`, `"failed"`,
+-/// `"cancelled"` or `"lost"`. `content` lists blocks:
++/// `"cancelled"` or `"lost"`. `created_at` is the wall clock, in epoch
++/// milliseconds, when the message was appended, or nil for a message older than
++/// the field, so a reader can tell a real zero gap from an unknown one.
++/// `content` lists blocks:
+ ///
+ /// ```text
+ /// { type = "text", text }
+diff --git a/maki-providers/src/types.rs b/maki-providers/src/types.rs
+index 0f64e3660..8516cc558 100644
+--- a/maki-providers/src/types.rs
++++ b/maki-providers/src/types.rs
+@@ -254,6 +254,7 @@ pub async fn adapt_images_for_model<'a>(
+             kind: message.kind.clone(),
+             receipts: message.receipts.clone(),
+             settles: message.settles.clone(),
++            created_at: message.created_at,
+         });
+     }
+     Cow::Owned(adapted)
+@@ -488,11 +489,16 @@ pub struct TaskSettled {
+ 
+ /// Part of the frozen session surface (disk, exports, Lua), written flat:
+ /// `{"role", "content", "display_text"?, "kind"?, "facts"?, "receipts"?,
+-/// "settles"?}`, with `kind` as a bare tag and `facts` beside a
++/// "settles"?, "created_at"?}`, with `kind` as a bare tag and `facts` beside a
+ /// `context_update`. Older logs nest it as
+ /// `{"kind": {"context_update": facts}}`. Those still load, and are not
+ /// rewritten just for that.
+ ///
++/// `created_at` is the wall clock when the message was appended, in epoch
++/// milliseconds. It is storage-only: providers build their wire body by hand and
++/// never read it. Absent on messages written before the field existed, so it is
++/// skipped when unset and a reader must treat a gap as unknown, not as idle.
++///
+ /// It only grows, by the same rules as [`ContentBlock`].
+ #[derive(Debug, Default, Clone, PartialEq, Deserialize)]
+ #[serde(try_from = "RawMessage")]
+@@ -506,6 +512,11 @@ pub struct Message {
+     pub receipts: Vec<String>,
+     /// Set on the notice that answers a receipt.
+     pub settles: Option<TaskSettled>,
++    /// Wall clock (epoch ms) when this message was appended to the transcript.
++    /// `None` for messages from before this field existed, and for ones built in
++    /// a test or replay that never reached the live append path.
++    #[serde(default)]
++    pub created_at: Option<u64>,
+ }
+ 
+ /// [`Message`] as stored, before `kind` and `facts` are paired up.
+@@ -523,6 +534,8 @@ struct RawMessage {
+     receipts: Vec<String>,
+     #[serde(default, deserialize_with = "settles_or_none")]
+     settles: Option<TaskSettled>,
++    #[serde(default)]
++    created_at: Option<u64>,
+ }
+ 
+ /// A newer build may write a [`TaskEnd`] this one does not know. Only the
+@@ -574,6 +587,7 @@ impl TryFrom<RawMessage> for Message {
+             kind,
+             receipts: raw.receipts,
+             settles: raw.settles,
++            created_at: raw.created_at,
+         })
+     }
+ }
+@@ -588,7 +602,8 @@ impl Serialize for Message {
+             + usize::from(!self.kind.is_turn())
+             + usize::from(facts.is_some())
+             + usize::from(!self.receipts.is_empty())
+-            + usize::from(self.settles.is_some());
++            + usize::from(self.settles.is_some())
++            + usize::from(self.created_at.is_some());
+         let mut state = serializer.serialize_struct("Message", len)?;
+         state.serialize_field("role", &self.role)?;
+         state.serialize_field("content", &self.content)?;
+@@ -607,6 +622,9 @@ impl Serialize for Message {
+         if let Some(settles) = &self.settles {
+             state.serialize_field("settles", settles)?;
+         }
++        if let Some(created_at) = self.created_at {
++            state.serialize_field("created_at", &created_at)?;
++        }
+         state.end()
+     }
+ }
