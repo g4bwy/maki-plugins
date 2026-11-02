@@ -1,23 +1,24 @@
 # Session Time Plugin
 
-Splits a session's time into what it spent idle, what inference (API requests)
-took, and what tools ran. `/time` opens a popup in the style of maki's own
-`/usage` modal. It reports both hot (the plugin watched the whole session) and
-cold (you open it on a session it never saw, after a reload or restart), because
-it reads the timing from the transcript rather than from memory.
+Splits a session's time into idle, inference (API requests), tool calls, and
+sub-agent runs. `/time` opens a popup in the style of maki's own `/usage` modal.
+It reports both hot (the plugin watched the whole session) and cold (you open it
+on a session it never saw, after a reload or restart), because it reads the timing
+from the transcript rather than from memory.
 
 ## What it tracks
 
 | Line | Meaning |
 |------|---------|
-| `wall clock` | The session time the plugin can account for: `idle + inference + tool`. |
+| `wall clock` | The session time the plugin accounts for: `idle + inference + tool + sub-agents`. |
 | `idle (awaiting input)` | Time waiting between a finished reply and the next prompt. |
 | `inference (api requests)` | Time the model spent generating, request start to response. |
-| `tool calls` | Time tools were running. Subagents and batched calls count once, over their overlapping window. |
+| `tool calls` | Time a local tool ran (`read`, `bash`, an MCP call, ...). |
+| `sub-agents` | Time the session was blocked on a `task` or `batch` call. Tracked apart, never counted as a tool call. |
 
-The three lower lines add up to `wall clock`. Each shows a percentage share, and
-a footer gives the turn count, the tool-call count, and what the session is doing
-now.
+The four lower lines add up to `wall clock`. Each shows a percentage share, and a
+footer gives the turn count, the tool-call count, the sub-agent count, and what
+the session is doing now.
 
 ## How it measures
 
@@ -26,10 +27,13 @@ plugin reads the transcript through `maki.session.messages()` and charges the
 gap that ends at each message by what that message is:
 
 ```
-message is a tool result    ->  tool call
+message is a tool result    ->  sub-agents, if the call was `task`/`batch`; else tool call
 message is an assistant     ->  inference
 message is a user prompt    ->  idle (the wait before you sent it)
 ```
+
+The tool's name is read from its `tool_use` block by id, so a result that closes a
+`task` or `batch` call goes to sub-agents, and any other result to tool calls.
 
 The turn in progress is not a message yet, so while a request or tool is live the
 panel adds the seconds since the last message to the matching bucket, from the
@@ -99,14 +103,16 @@ thread the same way.
 
 ## Limitations
 
-- Whole seconds on screen. Buckets accumulate in milliseconds, so many fast tool
-  calls still add up, but a single sub-second gap shows as `0s`.
-- The idle line is the wait between replies. Time with maki fully closed is not
-  in the transcript gaps, so it is not counted, rather than guessed as idle.
-- A tool moved to the background (Ctrl+B) records an instant receipt, so its long
-  run later lands in the next assistant gap and reads as inference, not tool time.
-- A message that is neither an assistant reply, a tool result, nor a user prompt
-  (a background notice, a context update) does not start or end a bucket; the gap
+- Whole seconds on screen. Buckets accumulate in milliseconds, so many fast calls
+  still add up, but a single sub-second gap shows as `0s`.
+- Sub-agent time is the window the parent was blocked on a `task`/`batch` call. It
+  is not the sub-agent's own work broken into inference and tools: that split lives
+  in the sub-agent transcript, which no plugin API returns (only a core change
+  could expose it). A sub-agent moved to the background (Ctrl+B) runs while the
+  parent does other things, so its wall time is counted under whatever the parent
+  was doing then, not added twice.
+- The idle line is the wait between replies. Time with maki fully closed is not in
+  the transcript gaps, so it is not counted, rather than guessed as idle.
+- A message that is neither an assistant reply, a tool result, nor a user prompt (a
+  background notice, a context update) does not start or end a bucket; the gap
   around it is left out rather than misfiled.
-- It measures the main session transcript. A subagent's own turns are stored
-  separately and show up as the parent's tool time, not as separate inference.

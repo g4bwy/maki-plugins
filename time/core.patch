@@ -1,5 +1,29 @@
+diff --git a/maki-agent/src/agent/compaction.rs b/maki-agent/src/agent/compaction.rs
+index 3bfe61585..69095a348 100644
+--- a/maki-agent/src/agent/compaction.rs
++++ b/maki-agent/src/agent/compaction.rs
+@@ -11,7 +11,7 @@ use serde_json::{Value, json};
+ use tracing::info;
+ 
+ use super::frame::{RunContext, fit_frame};
+-use super::history::{History, remove_orphaned_tool_results, strip_thinking};
++use super::history::{History, remove_orphaned_tool_results, stamp_new, strip_thinking};
+ use super::hook::{AgentHooks, AgentSlot};
+ use super::streaming::{StreamError, StreamRequest, min_output, stream_with_retry};
+ use crate::mcp::McpSession;
+@@ -289,8 +289,8 @@ fn finish_compact(
+     };
+ 
+     let mut new_history = vec![
+-        Message::user("What did we do so far?".into()),
+-        response.message,
++        stamp_new(Message::user("What did we do so far?".into())),
++        stamp_new(response.message),
+     ];
+     let summary_len = new_history.len();
+     new_history.extend_from_slice(&history.as_slice()[summarized..]);
 diff --git a/maki-agent/src/agent/history.rs b/maki-agent/src/agent/history.rs
-index e48abd5e8..1dda3d8a7 100644
+index e48abd5e8..bce591edf 100644
 --- a/maki-agent/src/agent/history.rs
 +++ b/maki-agent/src/agent/history.rs
 @@ -3,6 +3,7 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, Weak};
@@ -10,20 +34,93 @@ index e48abd5e8..1dda3d8a7 100644
  use maki_storage::frame::{LiveFacts, StoredFrame};
  use maki_storage::id::MakiId;
  use maki_storage::sessions::next_epoch;
-@@ -199,7 +200,10 @@ impl History {
-         &self.snapshot.messages
+@@ -200,7 +201,7 @@ impl History {
      }
  
--    pub fn push(&mut self, msg: Message) {
-+    pub fn push(&mut self, mut msg: Message) {
-+        if msg.created_at.is_none() {
-+            msg.created_at = Some(now_millis());
+     pub fn push(&mut self, msg: Message) {
+-        self.edit(|msgs| msgs.push(msg));
++        self.edit(|msgs| msgs.push(stamp_new(msg)));
+     }
+ 
+     /// A run future that gets dropped never reaches its cancel path, so the tool
+@@ -416,6 +417,15 @@ pub fn close_dangling_tool_calls(messages: &mut Vec<Message>, note: &str) {
+     }
+ }
+ 
++/// Fill a message's `created_at` on append. An existing stamp is kept, so a
++/// restored or replayed message holds the time it was first recorded, not now.
++pub(crate) fn stamp_new(mut msg: Message) -> Message {
++    if msg.created_at.is_none() {
++        msg.created_at = Some(now_millis());
++    }
++    msg
++}
++
+ fn dangling_results(messages: &[Message], note: &str) -> Option<Message> {
+     let last = messages.last()?;
+     if !matches!(last.role, Role::Assistant) || !last.has_tool_calls() {
+@@ -437,9 +447,15 @@ pub(crate) fn sanitize_cancelled_history(history: &mut History, rollback_len: us
+     if history.len() <= rollback_len {
+         return;
+     }
++    // Close dangling tool calls and add the cancel marker, stamping both. The
++    // free `close_dangling_tool_calls` is left for the restore path, which must
++    // not re-time messages it is only repairing.
++    let closing = dangling_results(history.as_slice(), CANCEL_MARKER).map(stamp_new);
+     history.edit(|msgs| {
+-        close_dangling_tool_calls(msgs, CANCEL_MARKER);
+-        msgs.push(Message::synthetic(CANCEL_MARKER.into()));
++        if let Some(closing) = closing {
++            msgs.push(closing);
 +        }
-         self.edit(|msgs| msgs.push(msg));
++        msgs.push(stamp_new(Message::synthetic(CANCEL_MARKER.into())));
+     });
+ }
+ 
+@@ -642,6 +658,41 @@ mod tests {
+         ));
      }
  
++    #[test]
++    fn push_stamps_created_at_and_keeps_an_existing_one() {
++        let mut history = History::new(vec![]);
++        history.push(Message::user(GO.into()));
++        assert!(
++            history.as_slice()[0].created_at.is_some(),
++            "push fills created_at on append"
++        );
++
++        history.push(Message {
++            role: Role::Assistant,
++            content: vec![],
++            created_at: Some(7),
++            ..Default::default()
++        });
++        assert_eq!(
++            history.as_slice()[1].created_at,
++            Some(7),
++            "an existing stamp survives a push"
++        );
++    }
++
++    #[test]
++    fn sanitize_cancelled_history_stamps_its_appends() {
++        let mut history = History::new(vec![Message::user(GO.into()), make_tool_use_msg(&["t1"])]);
++        sanitize_cancelled_history(&mut history, 0);
++        let [closing, marker] = &history.as_slice()[2..] else {
++            panic!("expected a closing result and the cancel marker");
++        };
++        assert!(
++            closing.created_at.is_some() && marker.created_at.is_some(),
++            "a cancelled turn's appended messages are timed, so a plugin can measure it"
++        );
++    }
++
+     fn text_msg(role: Role, text: &str) -> Message {
+         Message {
+             role,
 diff --git a/maki-lua/src/api/session.rs b/maki-lua/src/api/session.rs
-index e2b9135ca..8dee1ff77 100644
+index 160490a8f..5ae516a4e 100644
 --- a/maki-lua/src/api/session.rs
 +++ b/maki-lua/src/api/session.rs
 @@ -320,6 +320,7 @@ fn message_table(lua: &Lua, message: &Message) -> LuaResult<Value> {
@@ -56,7 +153,7 @@ index e2b9135ca..8dee1ff77 100644
  /// ```text
  /// { type = "text", text }
 diff --git a/maki-providers/src/types.rs b/maki-providers/src/types.rs
-index 0f64e3660..8516cc558 100644
+index 0f64e3660..56d12fc45 100644
 --- a/maki-providers/src/types.rs
 +++ b/maki-providers/src/types.rs
 @@ -254,6 +254,7 @@ pub async fn adapt_images_for_model<'a>(
@@ -134,3 +231,61 @@ index 0f64e3660..8516cc558 100644
          state.end()
      }
  }
+@@ -1847,6 +1865,32 @@ mod tests {
+         assert_eq!(serde_json::from_value::<Message>(stored).unwrap(), message);
+     }
+ 
++    /// `created_at` is a frozen session-format field: written only when set, read
++    /// back whole, and absent entirely from messages older than it, so a reader
++    /// tells an unknown gap from a real zero one.
++    #[test]
++    fn created_at_writes_only_when_set_and_round_trips() {
++        let stamp = 1_793_600_000_123_u64;
++        let with = Message {
++            created_at: Some(stamp),
++            ..Message::user(PROMPT.into())
++        };
++        let stored = json!({
++            "role": "user",
++            "content": [{ "type": "text", "text": PROMPT }],
++            "created_at": stamp,
++        });
++        assert_eq!(serde_json::to_value(&with).unwrap(), stored);
++        assert_eq!(serde_json::from_value::<Message>(stored).unwrap(), with);
++
++        let bare = Message::user(PROMPT.into());
++        assert_eq!(
++            serde_json::to_value(&bare).unwrap(),
++            json!({ "role": "user", "content": [{ "type": "text", "text": PROMPT }] })
++        );
++        assert_eq!(bare.created_at, None);
++    }
++
+     #[test]
+     fn an_unknown_task_end_drops_only_the_mark() {
+         let stored = json!({
+diff --git a/site/docs/content/lua-api/_index.md b/site/docs/content/lua-api/_index.md
+index 1255fe529..7265590b7 100644
+--- a/site/docs/content/lua-api/_index.md
++++ b/site/docs/content/lua-api/_index.md
+@@ -5260,7 +5260,7 @@ been sent so far, tool calls and results included. Read only.
+ Each message has the same shape as in the session file:
+ 
+ ```text
+-{ role = "user" | "assistant", kind, facts?, display_text?, receipts?, settles?, content = { blocks } }
++{ role = "user" | "assistant", kind, facts?, display_text?, receipts?, settles?, created_at?, content = { blocks } }
+ ```
+ 
+ `kind` is `"turn"` for something the user or the model said,
+@@ -5272,7 +5272,10 @@ content: nil shows the content, `""` hides the message (a nudge, a
+ compaction note). `receipts` lists the calls whose results in this
+ message moved to the background, and `settles` = `{ task, end }` marks the
+ notice that answered one, with `end` one of `"finished"`, `"failed"`,
+-`"cancelled"` or `"lost"`. `content` lists blocks:
++`"cancelled"` or `"lost"`. `created_at` is the wall clock, in epoch
++milliseconds, when the message was appended, or nil for a message older than
++the field, so a reader can tell a real zero gap from an unknown one.
++`content` lists blocks:
+ 
+ ```text
+ { type = "text", text }
