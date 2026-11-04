@@ -23,18 +23,18 @@ index 3bfe61585..69095a348 100644
      let summary_len = new_history.len();
      new_history.extend_from_slice(&history.as_slice()[summarized..]);
 diff --git a/maki-agent/src/agent/history.rs b/maki-agent/src/agent/history.rs
-index e48abd5e8..bce591edf 100644
+index 62161a005..5f01c8f9c 100644
 --- a/maki-agent/src/agent/history.rs
 +++ b/maki-agent/src/agent/history.rs
 @@ -3,6 +3,7 @@ use std::sync::{Arc, LazyLock, Mutex, MutexGuard, PoisonError, Weak};
  
  use arc_swap::ArcSwap;
- use maki_providers::{ContentBlock, EMPTY_RESPONSE_MARKER, Message, Role};
+ use maki_providers::{ContentBlock, EMPTY_RESPONSE_MARKER, Message, Model, Role};
 +use maki_storage::auth::now_millis;
  use maki_storage::frame::{LiveFacts, StoredFrame};
  use maki_storage::id::MakiId;
- use maki_storage::sessions::next_epoch;
-@@ -200,7 +201,7 @@ impl History {
+ use maki_storage::sessions::{SessionTools, next_epoch};
+@@ -212,7 +213,7 @@ impl History {
      }
  
      pub fn push(&mut self, msg: Message) {
@@ -43,7 +43,7 @@ index e48abd5e8..bce591edf 100644
      }
  
      /// A run future that gets dropped never reaches its cancel path, so the tool
-@@ -416,6 +417,15 @@ pub fn close_dangling_tool_calls(messages: &mut Vec<Message>, note: &str) {
+@@ -435,6 +436,15 @@ pub fn close_dangling_tool_calls(messages: &mut Vec<Message>, note: &str) {
      }
  }
  
@@ -59,7 +59,7 @@ index e48abd5e8..bce591edf 100644
  fn dangling_results(messages: &[Message], note: &str) -> Option<Message> {
      let last = messages.last()?;
      if !matches!(last.role, Role::Assistant) || !last.has_tool_calls() {
-@@ -437,9 +447,15 @@ pub(crate) fn sanitize_cancelled_history(history: &mut History, rollback_len: us
+@@ -456,9 +466,15 @@ pub(crate) fn sanitize_cancelled_history(history: &mut History, rollback_len: us
      if history.len() <= rollback_len {
          return;
      }
@@ -77,7 +77,7 @@ index e48abd5e8..bce591edf 100644
      });
  }
  
-@@ -642,6 +658,41 @@ mod tests {
+@@ -661,6 +677,41 @@ mod tests {
          ));
      }
  
@@ -265,7 +265,7 @@ index 0f64e3660..56d12fc45 100644
      fn an_unknown_task_end_drops_only_the_mark() {
          let stored = json!({
 diff --git a/site/docs/content/lua-api/_index.md b/site/docs/content/lua-api/_index.md
-index 1255fe529..7265590b7 100644
+index e5c00c158..003c385ec 100644
 --- a/site/docs/content/lua-api/_index.md
 +++ b/site/docs/content/lua-api/_index.md
 @@ -5260,7 +5260,7 @@ been sent so far, tool calls and results included. Read only.
